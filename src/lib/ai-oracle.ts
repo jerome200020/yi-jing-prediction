@@ -7,6 +7,7 @@ import type { GeminiReport } from '@/types/gemini';
 export const AVAILABLE_MODELS = [
   { id: 'gemini-2.5-flash', name: 'Gemini 2.5 Flash', description: 'Optimized for speed and structured outputs.' },
   { id: 'gemini-2.0-flash', name: 'Gemini 2.0 Flash', description: 'The latest fast model with improved reasoning.' },
+  { id: 'seed-1-8-251228', name: 'Seed 1.8 (BytePlus)', description: 'High-performance model from BytePlus/Volcengine.' },
   // { id: 'gemini-1.5-pro', name: 'Gemini 1.5 Pro', description: 'Best for complex reasoning and deep insights.' },
   // { id: 'gemini-3-pro', name: 'Gemini 3 Pro (Experimental)', description: 'Next-generation model for advanced testing.' },
   // { id: 'gemini-3-flash', name: 'Gemini 3 Flash (Experimental)', description: 'High-speed next-gen model for testing.' },
@@ -17,12 +18,14 @@ export const AVAILABLE_MODELS = [
  * This instructs the AI to act as a Yi-Jing Numerological Expert and
  * generate a structured JSON report.
  */
+
 export const GEMINI_PROMPT_TEMPLATE = `
 Act as an expert in Life Path Numerology and I Ching Numerology. Please perform a multi-layered analysis for me using the following inputs:
 - Subject Name: {{user_name}}
 - Input 1 (Static Fate / Birth Date): [{{dob}}]
 - Input 2 ({{label_1}}): [{{number_1}}]
 - Input 3 ({{label_2}}): [{{number_2}}]
+- Output Language: {{language}}
 
 # ReferenceTable1
 ## Four Auspicious Numbers (四吉數)
@@ -56,7 +59,8 @@ Act as an expert in Life Path Numerology and I Ching Numerology. Please perform 
 - Provide a final strategic verdict (ADVANCE, RETREAT, or BALANCE) based on whether the 'Time' and 'Position' are currently auspicious.
 
 # OUTPUT FORMAT
-Provide the report EXACTLY in the following JSON structure:
+Provide the report EXACTLY in the following JSON structure. 
+IMPORTANT: All string values in the JSON (descriptions, analysis, meanings) MUST be written in {{language}}. Keep JSON keys in English.
 {
   "report_meta": {
     "subject": "string",
@@ -122,6 +126,7 @@ export function generateGeminiPrompt(data: {
   dob: string;
   string1: { value: string; label: string };
   string2: { value: string; label: string };
+  language: string;
 }): string {
   return GEMINI_PROMPT_TEMPLATE
     .replace('{{user_name}}', data.userName)
@@ -129,25 +134,88 @@ export function generateGeminiPrompt(data: {
     .replace('{{label_1}}', data.string1.label)
     .replace('{{number_1}}', data.string1.value)
     .replace('{{label_2}}', data.string2.label)
-    .replace('{{number_2}}', data.string2.value);
+    .replace('{{number_2}}', data.string2.value)
+    .replaceAll('{{language}}', data.language);
 }
 
-const API_KEY = import.meta.env.VITE_GEMINI_API_KEY;
-const client = new GoogleGenAI({ apiKey: API_KEY });
+const GEMINI_API_KEY = import.meta.env.VITE_GEMINI_API_KEY;
+const SEED_API_KEY = import.meta.env.VITE_SEED_API_KEY;
+
+const geminiClient = new GoogleGenAI({ apiKey: GEMINI_API_KEY });
 
 /**
- * Fetches a structured Yi-Jing report from Gemini.
+ * Fetches a structured report from BytePlus (Seed Models).
+ */
+async function getBytePlusReport(prompt: string, modelName: string): Promise<GeminiReport> {
+  if (!SEED_API_KEY) {
+    throw new Error('VITE_SEED_API_KEY is not defined in environments.');
+  }
+
+  const response = await fetch('https://ark.ap-southeast.bytepluses.com/api/v3/chat/completions', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${SEED_API_KEY}`,
+    },
+    body: JSON.stringify({
+      model: modelName,
+      messages: [
+        {
+          role: 'user',
+          content: [
+            {
+              type: 'text',
+              text: prompt
+            }
+          ]
+        }
+      ],
+      response_format: { type: "json_object" } // Seed supports generic JSON mode
+    })
+  });
+
+  if (!response.ok) {
+    const errorText = await response.text();
+    console.error('BytePlus API Error:', errorText);
+    throw new Error(`BytePlus API Error: ${response.status} ${response.statusText}`);
+  }
+
+  const data = await response.json();
+  const content = data.choices?.[0]?.message?.content;
+
+  if (!content) {
+    throw new Error('No content received from BytePlus AI.');
+  }
+
+  try {
+    console.log('BytePlus response:', JSON.parse(content));
+    return JSON.parse(content) as GeminiReport;
+  } catch (error) {
+    console.error('Failed to parse BytePlus response as JSON:', content);
+    throw new Error('Invalid response format from AI.');
+  }
+}
+
+/**
+ * Fetches a structured Yi-Jing report from the selected Provider.
  */
 export async function getGeminiReport(
   data: Parameters<typeof generateGeminiPrompt>[0],
   modelName: string = 'gemini-1.5-flash'
 ): Promise<GeminiReport> {
-  if (!API_KEY) {
+  const prompt = generateGeminiPrompt(data);
+
+  // Dispatch based on Model ID prefix
+  if (modelName.startsWith('seed-')) {
+    return getBytePlusReport(prompt, modelName);
+  }
+
+  // Default to Gemini (Google)
+  if (!GEMINI_API_KEY) {
     throw new Error('VITE_GEMINI_API_KEY is not defined in environments.');
   }
 
-  const prompt = generateGeminiPrompt(data);
-  const result = await client.models.generateContent({
+  const result = await geminiClient.models.generateContent({
     model: modelName,
     contents: prompt,
     config: {
